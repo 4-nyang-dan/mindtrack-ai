@@ -1,0 +1,31 @@
+app:
+  env: "development"
+  log_level: "INFO"
+
+openai:
+  api_key: "YOUR_OPENAI_KEY"
+  temperature: 0.3
+  max_output_tokens: 300
+  top_p: 0.5
+  image_description_model: "gpt-4.1-mini"
+  embedding_model: "text-embedding-3-small"
+  action_predictor_model: "gpt-4.1-mini"
+  history_qa_model: "gpt-5-mini"
+
+vectordb:
+  path: "./vectorstore/description_index.faiss"
+  dim: 1536
+  search_top_k: 2
+  recent_k: 3
+
+image_selector:
+  n_clusters: null
+  random_state: 42
+
+ocr_pii:
+  tesseract_path: ""
+  ocr_conf_threshold: 30
+  pixel_size: 16
+
+integration:
+  sample_dir: "app/sample/uploads"

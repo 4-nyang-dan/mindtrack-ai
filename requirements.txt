@@ -6,9 +6,27 @@ openai
 faiss-cpu
 opencv-python
 pytesseract
-spacy
+
+spacy==3.8.0
+https://github.com/explosion/spacy-models/releases/download/ko_core_news_sm-3.8.0/ko_core_news_sm-3.8.0-py3-none-any.whl
+https://github.com/explosion/spacy-models/releases/download/en_core_web_lg-3.8.0/en_core_web_lg-3.8.0-py3-none-any.whl
+
 presidio-analyzer
 presidio-anonymizer
 pandas
 matplotlib
-numpy
+
+
+# 미설치 부분 추가
+redis
+numpy<2
+scikit-learn
+python-multipart
+torch==2.2.2 --index-url https://download.pytorch.org/whl/cpu
+torchvision==0.17.2 --index-url https://download.pytorch.org/whl/cpu
+
+#redis 설정
+sqlalchemy
+pillow
+psycopg2-binary
+sqlalchemy

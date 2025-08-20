@@ -11,5 +11,9 @@ def get_logger(name: str):
 
     if not logger.handlers:
         logger.addHandler(handler)
+    
+    # SQLAlchemy 로그 줄이기
+    logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
+    logging.getLogger("sqlalchemy.pool").setLevel(logging.WARNING)
 
     return logger

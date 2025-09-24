@@ -11,7 +11,7 @@ DB_PASS_RAW = os.getenv("POSTGRES_PASSWORD", "")
 DB_PASS = quote_plus(DB_PASS_RAW)  # 특수문자 안전 인코딩
 DB_HOST = os.getenv("POSTGRES_HOST", "postgres")
 DB_PORT = os.getenv("POSTGRES_PORT", "5432")
-DB_NAME = os.getenv("POSTGRES_DB", "postgres")
+DB_NAME = os.getenv("POSTGRES_DB", "mindtrack")
 
 # sqlalchemy 디버그 끄기
 for name in ("sqlalchemy.engine", "sqlalchemy.pool", "sqlalchemy.orm", "sqlalchemy.dialects"):

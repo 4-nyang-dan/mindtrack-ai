@@ -5,7 +5,7 @@ fastapi_worker_clean.py
 - 처리: pending → 폴더 저장 → AI 분석 → Spring 콜백 → 정리
 - 상태키/processing 제거, 구조 단순화
 """
-
+import re
 import os
 import time
 import shutil
@@ -22,7 +22,7 @@ log = get_logger("mindtrack.worker")
 # ===== 환경 설정 =====
 REDIS_HOST = os.getenv("REDIS_HOST", "redis")
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
-SPRING_BASE = os.getenv("SPRING_CALLBACK_BASE", "http://localhost:8080")
+SPRING_BASE = os.getenv("SPRING_CALLBACK_BASE", "http://spring-backend:8080")
 WINDOW_SEC = int(os.getenv("WINDOW_SEC", "15"))  # 윈도우 기간 (초)
 
 #  이미지 바이너리를 안전하게 다루기 위해 decode_responses=False 유지
@@ -95,18 +95,31 @@ def process_user_window(user_id: int):
         except Exception as e:
             log.exception(f"[WORKER] AI 분석 중 오류 user={user_id}: {e}")
         t_ai_end = time.time()
+        
         log.info(f"[PERF] AI 분석 소요시간: {t_ai_end - t_ai_start:.2f}s")
+        log.info(f"[WORKER] 분석 결과: {result}")
+
+        # 2.2 대표 이미지 ID 추출 및 결과 추출
+        rep_img_path = result.get("representative_image", "")
+        # 기존 폴더 경로로 반환하던걸 파일명으로 변경 
+        rep_img_name = os.path.basename(rep_img_path)  # ex) "000172_blurred.png"
+
+        match = re.search(r"(\d+)", rep_img_name)
+        representative_id = int(match.group(1)) if match else (collected_ids[0] if collected_ids else -1)
+
+
         desc = result.get("description", "")
         actions = result.get("predicted_actions", [])
         questions = result.get("predicted_questions", [])
 
-        log.info(f"[WORKER] 분석 결과: {result}")
+
 
         # 3. Spring 콜백
         payload = {
             "userId": str(user_id),
-            "imageIds": collected_ids,
+            "imageIds": representative_id, # 이미지 리스트 대신 대표 이미지 id 만 전송
             "suggestion": {
+                "representative_image": rep_img_name,
                 "description": desc,
                 "predicted_actions": actions,
             },

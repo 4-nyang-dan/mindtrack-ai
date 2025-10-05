@@ -19,8 +19,6 @@ r = redis.Redis(
     decode_responses=False,
 )
 
-def _orig_key(uid: int, img_id: int) -> str:
-    return f"user:{uid}:img:{img_id}"
 
 # ====== Startup 이벤트 ======
 @app.on_event("startup")
@@ -31,13 +29,14 @@ def on_startup():
             logger.warning("[startup] 이미 워커가 실행 중이므로 재기동 생략")
             return
         startup_done = True
-
+        
+         # 워커 스레드 시작
         from app.worker import run_forever
         t = threading.Thread(target=run_forever, daemon=True, name="worker-thread")
         t.start()
         logger.info("[startup] 워커 스레드 시작")
 
-        
+
 # ====== 헬스체크 ======
 @app.get("/health")
 def health():

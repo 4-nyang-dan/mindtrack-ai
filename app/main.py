@@ -2,17 +2,15 @@ import os, sys, logging, io, threading, redis
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from PIL import Image
-from app.worker import run_forever
-import logging
-from app.logging.logger import get_logger
-
+from app.logging.logger import get_logger  # 이거만 import, run_forever는 나중에 lazy import
 
 logger = get_logger("mindtrack.fastapi")
+
 startup_lock = threading.Lock()
 startup_done = False
+
 # ====== FastAPI 앱 ======
 app = FastAPI(title="mind-track AI", version="1.0.0")
-
 
 # ====== Redis 클라이언트 (bytes 유지) ======
 r = redis.Redis(
@@ -24,6 +22,7 @@ r = redis.Redis(
 def _orig_key(uid: int, img_id: int) -> str:
     return f"user:{uid}:img:{img_id}"
 
+# ====== Startup 이벤트 ======
 @app.on_event("startup")
 def on_startup():
     global startup_done
@@ -33,17 +32,19 @@ def on_startup():
             return
         startup_done = True
 
+        from app.worker import run_forever
         t = threading.Thread(target=run_forever, daemon=True, name="worker-thread")
         t.start()
         logger.info("[startup] 워커 스레드 시작")
 
-
-
+        
+# ====== 헬스체크 ======
 @app.get("/health")
 def health():
     return {"ok": True}
 
-''''
+# ====== (옵션) 원본 이미지 점검 API ======
+"""
 @app.get("/inspect/original/{user_id}/{image_id}")
 def inspect_original(user_id: int, image_id: int):
     key = _orig_key(user_id, image_id)
@@ -57,5 +58,4 @@ def inspect_original(user_id: int, image_id: int):
     except Exception as e:
         logger.exception(f"[/inspect] 이미지 오픈 실패 | key={key}")
         return JSONResponse(status_code=500, content={"error": f"cannot open image: {e}"})
-
-'''
+"""

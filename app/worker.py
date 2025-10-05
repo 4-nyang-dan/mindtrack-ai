@@ -85,7 +85,7 @@ def process_user_window(user_id: int):
             return
 
         log.info(f"[WORKER] user={user_id} 총 {len(collected_ids)}장 수집 완료. 분석 시작.")
-        log.info(f"[TIME] 수집 시간: {t_collect_end - t_collect_start:.2f}s")
+        log.info(f"[PERF] 수집 시간: {t_collect_end - t_collect_start:.2f}s")
         
         # 2.  AI 분석
         t_ai_start = time.time()
@@ -94,7 +94,8 @@ def process_user_window(user_id: int):
             result = _service.run_image_cycle(tmpdir) or {}
         except Exception as e:
             log.exception(f"[WORKER] AI 분석 중 오류 user={user_id}: {e}")
-
+        t_ai_end = time.time()
+        log.info(f"[PERF] AI 분석 소요시간: {t_ai_end - t_ai_start:.2f}s")
         desc = result.get("description", "")
         actions = result.get("predicted_actions", [])
         questions = result.get("predicted_questions", [])
@@ -111,15 +112,19 @@ def process_user_window(user_id: int):
             },
             "predicted_questions": [{"text": q} for q in questions[:3]],
         }
-
+        t_callback_start = time.time()
         try:
             requests.post(f"{SPRING_BASE}/analysis/result", json=payload, timeout=10)
             log.info(f"[WORKER] ✅ Spring 콜백 성공 user={user_id} (이미지 {len(collected_ids)}장)")
         except Exception as e:
             log.exception(f"[WORKER] 에러!- Spring 콜백 실패 user={user_id}: {e}")
+        t_callback_end = time.time()
+        log.info(f"[PERF] Spring 콜백 소요시간: {t_callback_end - t_callback_start:.2f}s")
 
     finally:
         # 4. 정리
+        total_time = time.time() - start_time
+        log.info(f"[PERF] 전체 윈도우 처리 총 시간: {total_time:.2f}s")
         shutil.rmtree(tmpdir, ignore_errors=True)
         for img_id in collected_ids:
             r.delete(k_img(user_id, img_id))
@@ -162,5 +167,6 @@ def run_forever():
             time.sleep(2)
 
 
-if __name__ == "__main__":
-    run_forever()
+#---main.py에서만 워커 시작하도록 유지 , 아래 코드는 주석 처리함
+#if __name__ == "__main__":
+#    run_forever()

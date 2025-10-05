@@ -1,9 +1,9 @@
 """
-fastapi_worker.py
-- 30초 주기로 Redis pending 큐에서 이미지 가져와 분석
-- pending → processing 원자적 이동
-- 임시 폴더로 이미지 다운로드 → AI 분석 → Spring 콜백
-- 처리 완료 후 Redis 정리
+fastapi_worker_clean.py
+- Redis에 쌓인 이미지를 30초 단위로 모아 분석(batch window)
+- Redis 구조: pending:{uid}, user:{uid}:img:{img_id}
+- 처리: pending → 폴더 저장 → AI 분석 → Spring 콜백 → 정리
+- 상태키/processing 제거, 구조 단순화
 """
 
 import os
@@ -12,149 +12,155 @@ import shutil
 import tempfile
 import requests
 import redis
-from typing import Optional
-
-# 내부 서비스 (AI 분석 파이프라인)
+import threading
+from typing import List
 from app.integration_service import IntegrationService
 from app.logging.logger import get_logger
 
 log = get_logger("mindtrack.worker")
 
-# ====== 환경 변수 ======
+# ===== 환경 설정 =====
 REDIS_HOST = os.getenv("REDIS_HOST", "redis")
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
 SPRING_BASE = os.getenv("SPRING_CALLBACK_BASE", "http://localhost:8080")
-POLL_INTERVAL_SEC = int(os.getenv("POLL_INTERVAL_SEC", "30"))
+WINDOW_SEC = int(os.getenv("WINDOW_SEC", "15"))  # 윈도우 기간 (초)
 
-# ====== Redis 연결 ======
-r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
-
-# ====== 서비스 초기화 ======
+#  이미지 바이너리를 안전하게 다루기 위해 decode_responses=False 유지
+r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=False)
 _service = IntegrationService()
 
+# 현재 처리 중인 유저 (중복 방지용)
+active_users = set()
+lock = threading.Lock()
 
 # ------------------------------------------------------------------
-# Redis 키 유틸 (Spring과 동일)
+# Redis 키 유틸
 # ------------------------------------------------------------------
-def k_img(uid: int, img_id: int) -> str:
-    return f"user:{uid}:img:{img_id}"
-
-def k_pending(uid: int) -> str:
-    return f"pending:{uid}"
-
-def k_processing(uid: int) -> str:
-    return f"processing:{uid}"
-
-def k_status(uid: int, img_id: int) -> str:
-    return f"screenshot:status:{uid}:{img_id}"
+def k_img(uid: int, img_id: int) -> bytes:
+    """Redis 이미지 키 (bytes로 반환)"""
+    return f"user:{uid}:img:{img_id}".encode("utf-8")
 
 
-# ------------------------------------------------------------------
-# 임시 디렉토리 유틸
-# ------------------------------------------------------------------
-def _ensure_tmp_dir(prefix="mt_job_") -> str:
-    return tempfile.mkdtemp(prefix=prefix)
-
-def _write_bytes(path: str, raw: bytes) -> None:
-    with open(path, "wb") as f:
-        f.write(raw)
+def k_pending(uid: int) -> bytes:
+    """Redis 큐 키 (bytes로 반환)"""
+    return f"pending:{uid}".encode("utf-8")
 
 
 # ------------------------------------------------------------------
-# 배치 실행
+# 유저별 윈도우(batch window) 처리
 # ------------------------------------------------------------------
-def process_one(user_id: int) -> bool:
-    """
-    - pending → processing 원자적 이동
-    - 이미지 다운로드 → 분석 → Spring 콜백
-    - 처리 완료 시 Redis 정리
-    """
-    # 1) pending → processing 이동
-    image_id = r.rpoplpush(k_pending(user_id), k_processing(user_id))
-    if image_id is None:
-        return False
-    image_id = int(image_id)
+def process_user_window(user_id: int):
+    """한 유저의 30초 윈도우(batch window) 동안 이미지 수집 후 분석"""
+    start_time = time.time()
+    collected_ids: List[int] = []
+    tmpdir = tempfile.mkdtemp(prefix=f"user{user_id}_")
 
-    log.info(f"[WORKER] user={user_id}, image={image_id} 처리 시작")
-    r.set(k_status(user_id, image_id), "PROCESSING")
+    log.info(f"[WORKER] user={user_id} 윈도우 시작 ({WINDOW_SEC}초 동안 수집 중...)")
 
-    # 2) 원본 이미지 로드
-    raw = r.get(k_img(user_id, image_id))
-    if not raw:
-        log.warning(f"[WORKER] 원본 이미지 없음 user={user_id}, image={image_id}")
-        r.lrem(k_processing(user_id), 0, image_id)
-        r.delete(k_status(user_id, image_id))
-        return True
-
-    # 3) 임시 디렉토리에 저장
-    tmpdir = _ensure_tmp_dir()
     try:
-        img_path = os.path.join(tmpdir, f"{image_id}.png")
-        _write_bytes(img_path, raw.encode() if isinstance(raw, str) else raw)
+        t_collect_start = time.time()
+        # 1. {WINDOW_SEC}초 동안 이미지 수집
+        while time.time() - start_time < WINDOW_SEC:
+            img_id = r.lpop(k_pending(user_id))
+            if not img_id:
+                time.sleep(0.2)
+                continue
 
-        # 4) AI 분석
-        result = _service.run_image_cycle(tmpdir)
-        description = (result.get("description") or "").strip()
-        p_actions   = result.get("predicted_actions")   or []
-        p_questions = result.get("predicted_questions") or []
+            try:
+                img_int = int(img_id.decode("utf-8") if isinstance(img_id, bytes) else img_id)
+            except ValueError:
+                continue
 
-        # 5) Spring 콜백
+            raw = r.get(k_img(user_id, img_int))
+            if not raw:
+                continue
+
+            img_path = os.path.join(tmpdir, f"{img_int}.png")
+            with open(img_path, "wb") as f:
+                f.write(raw)
+            collected_ids.append(img_int)
+        t_collect_end = time.time()
+        if not collected_ids:
+            log.info(f"[WORKER] user={user_id} 수집된 이미지 없음. 종료.")
+            return
+
+        log.info(f"[WORKER] user={user_id} 총 {len(collected_ids)}장 수집 완료. 분석 시작.")
+        log.info(f"[TIME] 수집 시간: {t_collect_end - t_collect_start:.2f}s")
+        
+        # 2.  AI 분석
+        t_ai_start = time.time()
+        result = {}
+        try:
+            result = _service.run_image_cycle(tmpdir) or {}
+        except Exception as e:
+            log.exception(f"[WORKER] AI 분석 중 오류 user={user_id}: {e}")
+
+        desc = result.get("description", "")
+        actions = result.get("predicted_actions", [])
+        questions = result.get("predicted_questions", [])
+
+        log.info(f"[WORKER] 분석 결과: {result}")
+
+        # 3. Spring 콜백
         payload = {
             "userId": str(user_id),
-            "imageId": image_id,
+            "imageIds": collected_ids,
             "suggestion": {
-                "description": description,
-                "predicted_actions": p_actions
+                "description": desc,
+                "predicted_actions": actions,
             },
-            "predicted_questions": [{"text": q} for q in p_questions[:3]]
+            "predicted_questions": [{"text": q} for q in questions[:3]],
         }
+
         try:
-            resp = requests.post(f"{SPRING_BASE}/analysis/result", json=payload, timeout=12)
-            resp.raise_for_status()
-            log.info(f"[WORKER] Spring 콜백 성공 user={user_id}, image={image_id}")
+            requests.post(f"{SPRING_BASE}/analysis/result", json=payload, timeout=10)
+            log.info(f"[WORKER] ✅ Spring 콜백 성공 user={user_id} (이미지 {len(collected_ids)}장)")
         except Exception as e:
-            log.exception(f"[WORKER] Spring 콜백 실패 user={user_id}, image={image_id}: {e}")
+            log.exception(f"[WORKER] 에러!- Spring 콜백 실패 user={user_id}: {e}")
 
     finally:
+        # 4. 정리
         shutil.rmtree(tmpdir, ignore_errors=True)
-
-        # 6) 처리 완료 → Redis 정리
-        r.lrem(k_processing(user_id), 0, image_id)
-        r.delete(k_img(user_id, image_id))
-        r.delete(k_status(user_id, image_id))
-
-    return True
+        for img_id in collected_ids:
+            r.delete(k_img(user_id, img_id))
+        
+        with lock:
+            active_users.discard(user_id)
+        
+        log.info(f"[WORKER] DONE! user={user_id} 윈도우 종료 (처리된 {len(collected_ids)}장)")
 
 
 # ------------------------------------------------------------------
-# 메인 루프
+# 메인 루프 (모든 유저 감시)
 # ------------------------------------------------------------------
-def run_forever(user_id: int) -> None:
-    log.info("[worker] start (windowed 30s batch)")
+def run_forever():
+    """Redis에서 모든 pending:* 큐를 감시하면서 각 유저별로 30초 윈도우 스레드 실행"""
+    log.info(f"[WORKER] start clean mode (window={WINDOW_SEC}s)")
     while True:
-        window_start = time.time()
-        processed_any = False
-        processed_count = 0;
-        # 30초 윈도우 동안 pending에서 가능한 만큼 꺼내서 처리
-        while time.time() - window_start < POLL_INTERVAL_SEC:
-            try:
-                processed = process_one(user_id)
-                if not processed:
-                    # 큐 비어있으면 짧게 쉬었다가 윈도우 기간 내 재확인
-                    time.sleep(0.2)
-                else:
-                    processed_any = True
-                    processed_count +=1; # 윈도우 내 수집 이미지 개수 카운트
-            except Exception as e:
-                log.exception("process_one error: %s", e)
-                time.sleep(1.0)
-    
-     # 윈도우 종료 — 처리 여부를 로깅
-        if processed_any:
-            log.info("[worker] window finished: processed %d items", processed_count)
-        else:
-            log.debug("[worker] window finished: no items processed")
+        try:
+            for key in r.scan_iter(b"pending:*"):  # bytes 단위 key
+                key_str = key.decode("utf-8")
+                user_id = int(key_str.split(":")[1])
+                
+                with lock:
+
+                    # 이미 윈도우 실행 중인 유저는 스킵
+                    if user_id in active_users:
+                        continue
+
+                    # 큐에 데이터가 있으면 새 윈도우 시작
+                    if r.llen(k_pending(user_id)) > 0:
+                        t = threading.Thread(target=process_user_window, args=(user_id,), daemon=True)
+                        t.start()
+                        active_users.add(user_id)
+                        log.info(f"[WORKER] ▶️ user={user_id} 윈도우 스레드 시작 (active={len(active_users)})")
+
+            time.sleep(1)
+
+        except Exception as e:
+            log.exception(f"[WORKER] 루프 오류: {e}")
+            time.sleep(2)
+
 
 if __name__ == "__main__":
-    USER_ID = int(os.getenv("WORKER_USER_ID", "1"))  # 단일 사용자 기준
-    run_forever(USER_ID)
+    run_forever()

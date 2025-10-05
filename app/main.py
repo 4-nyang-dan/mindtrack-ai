@@ -4,11 +4,12 @@ from fastapi.responses import JSONResponse
 from PIL import Image
 from app.worker import run_forever
 import logging
-
-
 from app.logging.logger import get_logger
-logger = get_logger("mindtrack.fastapi")
 
+
+logger = get_logger("mindtrack.fastapi")
+startup_lock = threading.Lock()
+startup_done = False
 # ====== FastAPI 앱 ======
 app = FastAPI(title="mind-track AI", version="1.0.0")
 
@@ -25,10 +26,18 @@ def _orig_key(uid: int, img_id: int) -> str:
 
 @app.on_event("startup")
 def on_startup():
-    # 1) 워커를 데몬으로 기동 - 워커가 Redis 를 감시하며 분석 진행
-    t = threading.Thread(target=run_forever, daemon=True, name="worker-thread")
-    t.start()
-    logger.info("[startup] 워커 스레드 시작")
+    global startup_done
+    with startup_lock:
+        if startup_done:
+            logger.warning("[startup] 이미 워커가 실행 중이므로 재기동 생략")
+            return
+        startup_done = True
+
+        t = threading.Thread(target=run_forever, daemon=True, name="worker-thread")
+        t.start()
+        logger.info("[startup] 워커 스레드 시작")
+
+
 
 @app.get("/health")
 def health():

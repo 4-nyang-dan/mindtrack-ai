@@ -116,18 +116,20 @@ def process_user_window(user_id: int):
 
         # 3. Spring 콜백
         payload = {
-            "userId": str(user_id),
-            "imageIds": representative_id, # 이미지 리스트 대신 대표 이미지 id 만 전송
+            "user_id": str(user_id),
+            "image_id": representative_id, # 이미지 리스트 대신 대표 이미지 id 만 전송
             "suggestion": {
                 "representative_image": rep_img_name,
                 "description": desc,
                 "predicted_actions": actions,
             },
-            "predicted_questions": [{"text": q} for q in questions[:3]],
+            "predicted_questions": [{"question": q} for q in questions[:3]],
         }
         t_callback_start = time.time()
         try:
             requests.post(f"{SPRING_BASE}/analysis/result", json=payload, timeout=10)
+            log.info(f"[CALLBACK TEST] posting to {SPRING_BASE}/analysis/result")
+            log.info(f"[CALLBACK PAYLOAD] {payload}")
             log.info(f"[WORKER] ✅ Spring 콜백 성공 user={user_id} (이미지 {len(collected_ids)}장)")
         except Exception as e:
             log.exception(f"[WORKER] 에러!- Spring 콜백 실패 user={user_id}: {e}")

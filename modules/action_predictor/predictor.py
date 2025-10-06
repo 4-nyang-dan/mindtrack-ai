@@ -23,8 +23,7 @@ class ActionPredictor:
         resp = self.client.responses.create(
             model=self.model_name,
             input=prompt,
-            temperature=0.3,
-            max_output_tokens=500
+            temperature=0.3
         )
         return resp.output_text
 

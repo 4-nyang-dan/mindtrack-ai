@@ -116,7 +116,7 @@ def process_user_window(user_id: int):
 
         # 3. Spring 콜백
         payload = {
-            "user_id": str(user_id),
+            "user_id": user_id,
             "image_id": representative_id, # 이미지 리스트 대신 대표 이미지 id 만 전송
             "suggestion": {
                 "representative_image": rep_img_name,

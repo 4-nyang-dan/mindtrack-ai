@@ -2,6 +2,7 @@ import sys
 import os
 import json
 import time  # 🔹 추가: 시간 측정용
+import traceback
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
@@ -76,6 +77,8 @@ class IntegrationService:
             "file": os.path.basename(rep_img_path),
             "text": description_text
         })
+
+        print("[FAISS] 인덱스 저장 시도 중...")
         self.db.save()
         print(f"[4] 임베딩 생성 및 저장 완료 - {time.perf_counter() - t4:.2f}s")
 
@@ -149,50 +152,100 @@ class IntegrationService:
             "predicted_questions": action_prediction.get("predicted_questions", [])
         }
 
-    ## HistoryQA 기능
+
+    def _format_ai_answer(self, user_question: str, answer: str):
+        """
+        모델 응답(JSON or 일반 문자열)을 파싱해
+        Q / AI의 생각 / A 형태로 반환.
+        """
+        try:
+            cleaned = (
+                answer.replace("```json", "")
+                .replace("```", "")
+                .strip()
+            )
+            parsed = json.loads(cleaned)
+        except Exception:
+            # JSON 형태가 아니면 fallback
+            parsed = {"reasoning_steps": [], "final_answer": answer.strip()}
+
+        reasoning_steps = parsed.get("reasoning_steps", [])
+        final_answer = parsed.get("final_answer", "").strip()
+
+        # 포맷 구성
+        if reasoning_steps:
+            thoughts = "\n".join([f"{i+1}. {step}" for i, step in enumerate(reasoning_steps)])
+        else:
+            thoughts = "(AI의 세부 사고 단계 정보가 제공되지 않았습니다.)"
+
+        # 최종 출력 구조
+        return {
+            "question": user_question.strip(),
+            "ai_thoughts": thoughts,
+            "answer": final_answer or "답변이 비어 있습니다."
+        }
+
     def answer_question(self, user_question: str):
         """
         사용자의 질문(user_question)에 대해, 최근 이미지 설명 기반으로 답변 생성.
         VectorDB에서 자동으로 context를 구성합니다.
         """
 
-        # 1️⃣ 벡터 DB가 비어있는 경우
-        if not self.db.metadata:
-            print("[경고] 벡터 DB에 데이터가 없습니다.")
-            return "데이터가 충분하지 않아 답변을 생성할 수 없습니다."
+        # === 컨텍스트 기본값 (없을 때도 프롬프트에서 처리 가능하도록 "X"로 설정)
+        current_context = "X"
+        recent_context = "X"
+        similar_context = "X"
 
-        # 2️⃣ 최근 설명(현재 컨텍스트)
-        current_item = self.db.metadata[-1]
-        current_context = current_item["text"]
+        try:
+            if self.db.metadata:
+                current_item = self.db.metadata[-1]
+                current_context = current_item.get("text", "") or "X"
 
-        # 3️⃣ 최근 기록 (최근 k개)
-        recent_items = self.db.get_recent(k=config["vectordb"]["recent_k"])
-        recent_context = "\n\n".join([item["text"] for item in recent_items if item["id"] != current_item["id"]])
+                # 최근 데이터
+                recent_items = self.db.get_recent(k=config["vectordb"]["recent_k"])
+                recent_context = "\n\n".join(
+                    [it.get("text", "") for it in recent_items if it.get("id") != current_item.get("id")]
+                ).strip() or "X"
 
-        # 4️⃣ 유사 컨텍스트 검색
-        embedding = self.embed_gen.generate_embedding(current_context)
-        similar_results = self.db.search_vector(
-            embedding,
-            top_k=config["vectordb"]["search_top_k"],
-            exclude_id=current_item["id"]
-        )
-        similar_context = "\n\n".join([r["metadata"]["text"] for r in similar_results])
+                # 유사 검색
+                if current_context and current_context != "X":
+                    embedding = self.embed_gen.generate_embedding(current_context)
+                    similar_results = self.db.search_vector(
+                        embedding,
+                        top_k=config["vectordb"]["search_top_k"],
+                        exclude_id=current_item["id"]
+                    )
+                    similar_context = "\n\n".join(
+                        [r["metadata"]["text"] for r in similar_results]
+                    ).strip() or "X"
 
-        # 5️⃣ 히스토리 기반 Q&A 수행
-        answer = self.history_qa.answer(
-            current_context=current_context,
-            recent_context=recent_context,
-            similar_context=similar_context,
-            user_question=user_question
-        )
+            # === 모델 호출
+            answer = self.history_qa.answer(
+                current_context=current_context,
+                recent_context=recent_context,
+                similar_context=similar_context,
+                user_question=user_question
+            )
 
-        # 6️⃣ 결과 출력
-        print("\n[질문]")
-        print(user_question)
-        print("\n[답변]")
-        print(answer)
+            print("\n[질문]")
+            print(user_question)
+            print("\n[모델 RAW 응답]")
+            print(answer)
 
-        return answer
+            formatted = self._format_ai_answer(user_question, answer)
+            print("\n[포맷팅된 결과]")
+            print(json.dumps(formatted, ensure_ascii=False, indent=2))
+            return formatted
+
+        except Exception as e:
+            print(f"[오류] answer_question 처리 중 예외 발생: {e}")
+            traceback.print_exc()
+            return {
+                "question": user_question,
+                "ai_thoughts": "(예외가 발생하여 기본 응답을 반환합니다.)",
+                "answer": "답변을 생성하는 중 문제가 발생했습니다."
+            }
+
 
 
 if __name__ == "__main__":

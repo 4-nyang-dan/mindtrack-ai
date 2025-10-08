@@ -14,13 +14,20 @@ class VectorDBStorage:
 
         os.makedirs(db_dir, exist_ok=True)
 
+        # 기본 인덱스 구조
         self.index = faiss.IndexFlatL2(dim)
         self.metadata = []
         self._id_counter = 1
 
-        if os.path.exists(self.index_path):
+        # 🔹 DB 파일이 이미 존재하면 로드
+        if os.path.exists(self.index_path) and os.path.exists(self.meta_path):
             self._load()
             self._id_counter = len(self.metadata) + 1
+            print(f"[FAISS] 기존 인덱스 로드 완료 ({len(self.metadata)}개)")
+        else:
+            # 🔹 파일이 없으면 초기화 + 즉시 저장
+            print("[FAISS] 인덱스 파일이 없어 새로 생성합니다.")
+            self.save()  # ✅ 바로 .faiss / .meta 생성
 
     def add_vector(self, embedding, metadata):
         """Add a vector and its metadata to the index."""
@@ -35,10 +42,11 @@ class VectorDBStorage:
     def search_vector(self, query_embedding, top_k=3, exclude_id=None):
         """Search for top_k most similar vectors, excluding exclude_id if provided."""
         if self.index.ntotal == 0:
+            print("[FAISS] 인덱스가 비어 있습니다. 검색 결과 없음.")
             return []
 
         query = np.array(query_embedding).astype("float32").reshape(1, -1)
-        distances, indices = self.index.search(query, top_k + 1)  # extra for exclusion
+        distances, indices = self.index.search(query, top_k + 1)
 
         results = []
         for idx, dist in zip(indices[0], distances[0]):
@@ -51,7 +59,6 @@ class VectorDBStorage:
                 })
             if len(results) == top_k:
                 break
-
         return results
 
     def get_recent(self, k=3):
@@ -63,12 +70,18 @@ class VectorDBStorage:
         faiss.write_index(self.index, self.index_path)
         with open(self.meta_path, "wb") as f:
             pickle.dump(self.metadata, f)
+        print(f"[FAISS] 인덱스 저장 완료 → {self.index_path}")
 
     def _load(self):
         """Load FAISS index and metadata from disk."""
-        self.index = faiss.read_index(self.index_path)
-        with open(self.meta_path, "rb") as f:
-            self.metadata = pickle.load(f)
+        try:
+            self.index = faiss.read_index(self.index_path)
+            with open(self.meta_path, "rb") as f:
+                self.metadata = pickle.load(f)
+        except Exception as e:
+            print(f"[FAISS] 로드 실패 → 새 인덱스 초기화 ({e})")
+            self.index = faiss.IndexFlatL2(self.dim)
+            self.metadata = []
 
 
 if __name__ == "__main__":

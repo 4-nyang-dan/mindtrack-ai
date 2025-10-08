@@ -71,6 +71,7 @@ def inspect_original(user_id: int, image_id: int):
         return JSONResponse(status_code=500, content={"error": f"cannot open image: {e}"})
 """
 
+# ====== QA 엔드포인트 ======
 @app.post("/api/qa/answer")
 def answer_question(data: dict = Body(...)):
     """
@@ -78,8 +79,19 @@ def answer_question(data: dict = Body(...)):
     """
     question = data.get("question")
     if not question:
-        return {"answer": "질문이 비어 있습니다."}
+        return JSONResponse(status_code=400, content={"error": "질문이 비어 있습니다."})
 
-    print(f"[QA 요청 수신] question={question}")
-    answer = service.answer_question(question)
-    return {"answer": answer}
+    logger.info(f"[QA 요청 수신] question={question}")
+    try:
+        result = service.answer_question(question)
+        return JSONResponse(content=result)
+    except Exception as e:
+        logger.exception(f"[QA 처리 중 예외 발생] {e}")
+        return JSONResponse(
+            status_code=500,
+            content={
+                "question": question,
+                "ai_thoughts": "(오류 발생)",
+                "answer": "답변을 생성하는 중 문제가 발생했습니다."
+            },
+        )

@@ -56,7 +56,7 @@ openai:
   history_qa_model: "gpt-5-mini"
 
 vectordb:
-  path: "./vectorstore/description_index.faiss"
+  path: "./vectorstore/description_index.meta"
   dim: 1536
   recent_k: 3
   search_top_k: 2

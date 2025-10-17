@@ -93,7 +93,7 @@ mindtrack-ai/
 | `openai` | `embedding_model` | 임베딩 모델명 | `text-embedding-3-small` |
 | `openai` | `action_predictor_model` | 행동 예측 모델명 | `gpt-4.1-mini` |
 | `openai` | `history_qa_model` | QA 모델명 | `gpt-5-mini` |
-| `vectordb` | `path` | 벡터DB 저장 경로 | `./vectorstore/description_index.faiss` |
+| `vectordb` | `path` | 벡터DB 저장 경로 | `./vectorstore/description_index.meta` |
 | `vectordb` | `dim` | 벡터 차원 수 | `1536` |
 | `vectordb` | `recent_k` | 최근 검색 개수 | `3` |
 | `vectordb` | `search_top_k` | 유사 검색 개수 | `2` |

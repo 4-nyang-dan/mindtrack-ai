@@ -16,6 +16,7 @@ import threading
 from typing import List
 from app.integration_service import IntegrationService
 from app.logging.logger import get_logger
+from queue import Queue # 병렬 분석 파이프라인용 큐 추가
 
 log = get_logger("mindtrack.worker")
 
@@ -32,6 +33,9 @@ _service = IntegrationService()
 # 현재 처리 중인 유저 (중복 방지용)
 active_users = set()
 lock = threading.Lock()
+
+# 분석을 비동기적으로 수행하기 위한 큐 생성
+analysis_queue = Queue()
 
 # ------------------------------------------------------------------
 # Redis 키 유틸
@@ -50,121 +54,141 @@ def k_pending(uid: int) -> bytes:
 # 유저별 윈도우(batch window) 처리
 # ------------------------------------------------------------------
 def process_user_window(user_id: int):
-    """한 유저의 30초 윈도우(batch window) 동안 이미지 수집 후 분석"""
-    start_time = time.time()
-    collected_ids: List[int] = []
-    tmpdir = tempfile.mkdtemp(prefix=f"user{user_id}_")
+    """
+    한 유저의 15초 윈도우(batch window) 동안 Redis 큐에서 이미지를 수집하고
+    새 tmpdir에 저장한 뒤, 분석 큐(analysis_queue)에 전달한다.
+    이후 즉시 다음 윈도우 수집으로 넘어가며, 분석은 별도 스레드에서 수행된다.
+    """
 
-    log.info(f"[WORKER] user={user_id} 윈도우 시작 ({WINDOW_SEC}초 동안 수집 중...)")
+    while True:
+            start_time = time.time()
+            collected_ids: List[int] = []
+            tmpdir = tempfile.mkdtemp(prefix=f"user{user_id}_")
 
-    try:
-        t_collect_start = time.time()
-        # 1. {WINDOW_SEC}초 동안 이미지 수집
-        while time.time() - start_time < WINDOW_SEC:
-            img_id = r.lpop(k_pending(user_id))
-            if not img_id:
-                time.sleep(0.2)
+            #log.info(f"[WORKER] user={user_id} 윈도우 시작 ({WINDOW_SEC}초 동안 수집 중...)")
+            log.info(f"[COLLECT] user={user_id} 수집 스레드 시작 (window={WINDOW_SEC}s)")
+
+            # 1. {WINDOW_SEC}초 동안 이미지 수집
+            while time.time() - start_time < WINDOW_SEC:
+                img_id = r.lpop(k_pending(user_id))
+                if not img_id:
+                    time.sleep(0.2)
+                    continue
+
+                try:
+                    img_int = int(img_id.decode("utf-8") if isinstance(img_id, bytes) else img_id)
+                except ValueError:
+                    continue
+
+                raw = r.get(k_img(user_id, img_int))
+                if not raw:
+                    continue
+
+                img_path = os.path.join(tmpdir, f"{img_int}.png")
+                with open(img_path, "wb") as f:
+                    f.write(raw)
+                collected_ids.append(img_int)
+            
+            # 2. 수집된 이미지가 없으면 tmpdir 삭제 후 다음 루프로 이동
+            if not collected_ids:
+                log.info(f"[COLLECT] user={user_id} 수집된 이미지 없음. 다음 윈도우 대기.")
+                shutil.rmtree(tmpdir, ignore_errors=True)
                 continue
+            
+            # 3. 수집 완료 → 분석 큐에 전
+            log.info(f"[WORKER] user={user_id} 총 {len(collected_ids)}장 수집 완료. 분석 큐에 전달.")
+            analysis_queue.put((user_id, tmpdir, collected_ids))
 
+            # 4. 즉시 다음 윈도우 수집 시작 (분석은 별도 스레드에서 수행)
+            log.info(f"[COLLECT] user={user_id} 다음 윈도우로 이동.")
+
+
+def analyze_worker():
+    """
+    process_user_window()가 analysis_queue에 넣은 작업을 소비한다.
+    각 폴더(tmpdir)에 대해 AI 분석을 수행하고, Spring 콜백 전송 및 데이터 정리를 담당한다.
+    """
+    while True:
+        try:
+            user_id, tmpdir, collected_ids = analysis_queue.get()
+            log.info(f"[ANALYZE] user={user_id} 폴더={tmpdir} 분석 시작 ({len(collected_ids)}장)")
+            # 1. AI 분석 실행
+            t_ai_start = time.time()
+            result = {}
             try:
-                img_int = int(img_id.decode("utf-8") if isinstance(img_id, bytes) else img_id)
-            except ValueError:
-                continue
+                result = _service.run_image_cycle(tmpdir) or {}
+            except Exception as e:
+                log.exception(f"[ANALYZE] AI 분석 오류 user={user_id}: {e}")
+            t_ai_end = time.time()
 
-            raw = r.get(k_img(user_id, img_int))
-            if not raw:
-                continue
+            log.info(f"[PERF] AI 분석 소요시간: {t_ai_end - t_ai_start:.2f}s")
+            log.info(f"[ANALYZE] 분석 결과: {result}")
 
-            img_path = os.path.join(tmpdir, f"{img_int}.png")
-            with open(img_path, "wb") as f:
-                f.write(raw)
-            collected_ids.append(img_int)
-        t_collect_end = time.time()
-        if not collected_ids:
-            log.info(f"[WORKER] user={user_id} 수집된 이미지 없음. 종료.")
-            return
+            # 2. 대표 이미지 및 결과 추출
+            rep_img_path = result.get("representative_image", "")
+            rep_img_name = os.path.basename(rep_img_path)
+            match = re.search(r"(\d+)", rep_img_name)
+            representative_id = int(match.group(1)) if match else (collected_ids[0] if collected_ids else -1)
 
-        log.info(f"[WORKER] user={user_id} 총 {len(collected_ids)}장 수집 완료. 분석 시작.")
-        log.info(f"[PERF] 수집 시간: {t_collect_end - t_collect_start:.2f}s")
-        
-        # 2.  AI 분석
-        t_ai_start = time.time()
-        result = {}
-        try:
-            result = _service.run_image_cycle(tmpdir) or {}
-        except Exception as e:
-            log.exception(f"[WORKER] AI 분석 중 오류 user={user_id}: {e}")
-        t_ai_end = time.time()
-        
-        log.info(f"[PERF] AI 분석 소요시간: {t_ai_end - t_ai_start:.2f}s")
-        log.info(f"[WORKER] 분석 결과: {result}")
+            desc = result.get("description", "")
+            actions = result.get("predicted_actions", [])
+            questions = result.get("predicted_questions", [])
 
-        # 2.2 대표 이미지 ID 추출 및 결과 추출
-        rep_img_path = result.get("representative_image", "")
-        # 기존 폴더 경로로 반환하던걸 파일명으로 변경 
-        rep_img_name = os.path.basename(rep_img_path)  # ex) "000172_blurred.png"
+            payload = {
+                "user_id": user_id,
+                "image_id": representative_id,
+                "suggestion": {
+                    "representative_image": rep_img_name,
+                    "description": desc,
+                    "predicted_actions": actions,
+                },
+                "predicted_questions": [{"question": q} for q in questions[:3]],
+            }
 
-        match = re.search(r"(\d+)", rep_img_name)
-        representative_id = int(match.group(1)) if match else (collected_ids[0] if collected_ids else -1)
+            t_callback_start = time.time()
+            try:
+                requests.post(f"{SPRING_BASE}/analysis/result", json=payload, timeout=10)
+                log.info(f"[CALLBACK TEST] posting to {SPRING_BASE}/analysis/result")
+                log.info(f"[CALLBACK PAYLOAD] {payload}")
+                log.info(f"[ANALYZE] ✅ Spring 콜백 성공 user={user_id}")
+            except Exception as e:
+                log.exception(f"[ANALYZE] Spring 콜백 실패 user={user_id}: {e}")
+            t_callback_end = time.time()
 
+            log.info(f"[PERF] Spring 콜백 소요시간: {t_callback_end - t_callback_start:.2f}s")
 
-        desc = result.get("description", "")
-        actions = result.get("predicted_actions", [])
-        questions = result.get("predicted_questions", [])
-
-
-
-        # 3. Spring 콜백
-        payload = {
-            "user_id": user_id,
-            "image_id": representative_id, # 이미지 리스트 대신 대표 이미지 id 만 전송
-            "suggestion": {
-                "representative_image": rep_img_name,
-                "description": desc,
-                "predicted_actions": actions,
-            },
-            "predicted_questions": [{"question": q} for q in questions[:3]],
-        }
-        t_callback_start = time.time()
-        try:
-            requests.post(f"{SPRING_BASE}/analysis/result", json=payload, timeout=10)
-            log.info(f"[CALLBACK TEST] posting to {SPRING_BASE}/analysis/result")
-            log.info(f"[CALLBACK PAYLOAD] {payload}")
-            log.info(f"[WORKER] ✅ Spring 콜백 성공 user={user_id} (이미지 {len(collected_ids)}장)")
-        except Exception as e:
-            log.exception(f"[WORKER] 에러!- Spring 콜백 실패 user={user_id}: {e}")
-        t_callback_end = time.time()
-        log.info(f"[PERF] Spring 콜백 소요시간: {t_callback_end - t_callback_start:.2f}s")
-
-    finally:
-        # 4. 정리
-        total_time = time.time() - start_time
-        log.info(f"[PERF] 전체 윈도우 처리 총 시간: {total_time:.2f}s")
-        shutil.rmtree(tmpdir, ignore_errors=True)
-        for img_id in collected_ids:
-            r.delete(k_img(user_id, img_id))
-        
-        with lock:
-            active_users.discard(user_id)
-        
-        log.info(f"[WORKER] DONE! user={user_id} 윈도우 종료 (처리된 {len(collected_ids)}장)")
-
+        finally:
+            # 정리: temp 폴더 및 redis 데이터 정리
+            for img_id in collected_ids:
+                r.delete(k_img(user_id, img_id))  #분석 끝난 원본 이미지를 정리해줘야 메모리 누수 방지
+            shutil.rmtree(tmpdir, ignore_errors=True)
+            analysis_queue.task_done()
+            log.info(f"[ANALYZE] user={user_id} 분석 완료 및 정리 완료 ({len(collected_ids)}장)")
 
 # ------------------------------------------------------------------
 # 메인 루프 (모든 유저 감시)
 # ------------------------------------------------------------------
 def run_forever():
-    """Redis에서 모든 pending:* 큐를 감시하면서 각 유저별로 30초 윈도우 스레드 실행"""
-    log.info(f"[WORKER] start clean mode (window={WINDOW_SEC}s)")
+    """
+    Redis의 pending:* 큐를 주기적으로 감시하여,
+    유저별로 수집 스레드를 실행한다.
+    동시에 하나의 분석 스레드(analyze_worker)가 큐를 소비하며 병렬로 동작한다.
+    """
+    
+    log.info(f"[WORKER] start pipeline mode (window={WINDOW_SEC}s)")
+    
+    # 분석 전용 스레드 시작 (큐 소비자)
+    threading.Thread(target=analyze_worker, daemon=True).start()
+
     while True:
         try:
-            for key in r.scan_iter(b"pending:*"):  # bytes 단위 key
+            for key in r.scan_iter(b"pending:*"):  # bytes 단위 key -> Redis 내 모든 유저 큐 탐색
                 key_str = key.decode("utf-8")
                 user_id = int(key_str.split(":")[1])
                 
                 with lock:
 
-                    # 이미 윈도우 실행 중인 유저는 스킵
+                    # 이미 윈도우 실행 중인 유저(수집 스레드가 실행 중)는 스킵
                     if user_id in active_users:
                         continue
 
@@ -173,7 +197,7 @@ def run_forever():
                         t = threading.Thread(target=process_user_window, args=(user_id,), daemon=True)
                         t.start()
                         active_users.add(user_id)
-                        log.info(f"[WORKER] ▶️ user={user_id} 윈도우 스레드 시작 (active={len(active_users)})")
+                        log.info(f"[WORKER] ▶ user={user_id} 스레드 시작 (active={len(active_users)})")
 
             time.sleep(1)
 

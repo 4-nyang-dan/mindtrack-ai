@@ -14,6 +14,7 @@ from modules.action_predictor import ActionPredictor
 from modules.history_qa import HistoryQA
 
 
+
 class IntegrationService:
     def __init__(self):
         ## 초기화 (시간 측정 가능)
@@ -36,6 +37,9 @@ class IntegrationService:
             index_name=os.path.splitext(os.path.basename(config["vectordb"]["path"]))[0],
             dim=config["vectordb"]["dim"]
         )
+        
+        self.db.reset()
+
         self.action_predictor = ActionPredictor(
             model_name=config["openai"]["action_predictor_model"]
         )

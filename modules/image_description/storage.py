@@ -83,6 +83,27 @@ class VectorDBStorage:
             self.index = faiss.IndexFlatL2(self.dim)
             self.metadata = []
 
+    def reset(self):
+        """
+        완전 초기화: 기존 .faiss / .meta 파일을 삭제하고 새 인덱스로 재생성.
+        """
+        # 1️ 기존 파일 삭제
+        if os.path.exists(self.index_path):
+            os.remove(self.index_path)
+            print(f"[FAISS] 기존 인덱스 파일 삭제 → {self.index_path}")
+        if os.path.exists(self.meta_path):
+            os.remove(self.meta_path)
+            print(f"[FAISS] 기존 메타파일 삭제 → {self.meta_path}")
+
+        # 2️ 새 인덱스 및 메타데이터 초기화
+        self.index = faiss.IndexFlatL2(self.dim)
+        self.metadata = []
+        self._id_counter = 1
+
+        # 3️ 새 파일로 즉시 저장
+        self.save()
+        print("[FAISS] 인덱스가 완전히 초기화되었습니다. (파일 재생성 완료)")
+
 
 if __name__ == "__main__":
     # Directories for sample embeddings and descriptions

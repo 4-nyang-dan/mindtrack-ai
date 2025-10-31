@@ -47,7 +47,7 @@ class OntologyTransformer:
 
 
 # --------------------------
-# 🧪 시연용 main
+# 시연용 main
 # --------------------------
 if __name__ == "__main__":
     base_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))

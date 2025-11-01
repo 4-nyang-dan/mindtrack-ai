@@ -12,7 +12,9 @@ You are given:
 - The current step in the process.
 - The detailed instructions for the step.
 
-Use this to describe what the screen *conceptually represents* in the user's journey.
+### Task
+Observe the image carefully and produce a JSON output describing the user’s current action in detailed Korean prose.
+You must describe the action of User's screen. Not a guide. You are image caption helper.
 
 ### Goal
 {{goal}}
@@ -26,5 +28,5 @@ Use this to describe what the screen *conceptually represents* in the user's jou
 ### Output Format (Required)
 Return only valid JSON:
 {
-  "screen_caption": "A smooth, natural English description of what the user is currently doing or focusing on, based solely on task context, not UI structure."
+  "screen_caption": "한글 문단으로 사용자의 현재 행동을 구체적이고 상세하게 서술한 내용."
 }

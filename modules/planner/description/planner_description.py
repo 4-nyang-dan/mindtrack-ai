@@ -91,6 +91,7 @@ if __name__ == "__main__":
     save_dir = os.path.join(base_dir, "../", "app", "sample", "planner", "caption")
     os.makedirs(save_dir, exist_ok=True)
     save_path = os.path.join(save_dir, "caption_result.json")
+    
 
     with open(save_path, "w", encoding="utf-8") as f:
         json.dump(result, f, ensure_ascii=False, indent=2)
